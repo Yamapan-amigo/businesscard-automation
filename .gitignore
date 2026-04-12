@@ -1,0 +1,16 @@
+.env
+.eight_session.json
+.token_cache.json
+.processed_contacts.json
+app.db
+app.db-wal
+app.db-shm
+data/
+user_sessions/
+__pycache__/
+*.pyc
+.pytest_cache/
+.outlook_profile/
+.outlook_session.json
+eight_session.json
+.DS_Store
