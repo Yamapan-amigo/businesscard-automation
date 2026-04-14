@@ -75,10 +75,14 @@ if st.button("📥 名刺データを取得", type="primary", use_container_widt
                 since_date=since_date,
             )
 
-            if not result.contacts:
-                if result.pending_count > 0:
+            # Support both FetchResult (new) and plain list (legacy cache)
+            contacts_list = list(getattr(result, "contacts", result) or [])
+            pending_count = int(getattr(result, "pending_count", 0) or 0)
+
+            if not contacts_list:
+                if pending_count > 0:
                     st.warning(
-                        f"⏳ 対象期間に {result.pending_count} 件の名刺がありますが、"
+                        f"⏳ 対象期間に {pending_count} 件の名刺がありますが、"
                         "まだ Eight 側で OCR 処理中です（名前・会社名などが未取得）。"
                         "数分〜数時間後にもう一度お試しください。"
                     )
@@ -87,11 +91,11 @@ if st.button("📥 名刺データを取得", type="primary", use_container_widt
                 st.stop()
 
             # Save to SQLite
-            inserted = db.save_contacts(result.contacts, username=username)
+            inserted = db.save_contacts(contacts_list, username=username)
 
-            msg = f"✅ {len(result.contacts)} 件の連絡先を取得（新規DB保存: {inserted} 件）"
-            if result.pending_count > 0:
-                msg += f" / OCR処理中: {result.pending_count} 件"
+            msg = f"✅ {len(contacts_list)} 件の連絡先を取得（新規DB保存: {inserted} 件）"
+            if pending_count > 0:
+                msg += f" / OCR処理中: {pending_count} 件"
             st.success(msg)
 
         except RuntimeError as e:
