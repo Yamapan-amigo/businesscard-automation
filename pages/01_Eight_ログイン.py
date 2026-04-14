@@ -7,9 +7,12 @@ from datetime import datetime
 import streamlit as st
 
 import scraper_api
+import sidebar_user
 import user_session
+import user_storage
 
 st.set_page_config(page_title="Eight ログイン", page_icon="🔑")
+sidebar_user.render_user_sidebar()
 
 st.title("🔑 Eight ログイン")
 
@@ -36,6 +39,7 @@ st.divider()
 
 # --- Upload session ---
 st.subheader("セッションのアップロード")
+session_upload_key = user_storage.scoped_key(username, "session_upload")
 
 st.markdown("""
 **手順:**
@@ -50,7 +54,7 @@ st.markdown("""
 uploaded = st.file_uploader(
     "セッションファイルをアップロード",
     type=["json"],
-    key="session_upload",
+    key=session_upload_key,
 )
 
 if uploaded is not None:

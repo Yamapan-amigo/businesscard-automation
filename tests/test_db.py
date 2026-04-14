@@ -9,6 +9,7 @@ import sqlite3
 from unittest.mock import patch
 
 import db
+import user_storage
 
 
 def test_init_db(tmp_path: Path) -> None:
@@ -139,3 +140,64 @@ def test_migrate_from_json(tmp_path: Path) -> None:
     with patch.object(db, "DB_FILE", test_db):
         assert db.get_processed_count() == 3
         assert db.is_processed("id1")
+
+
+def test_user_scoped_data_is_isolated(tmp_path: Path) -> None:
+    user_data_dir = tmp_path / "user_data"
+
+    alice_contacts = [
+        {"card_id": "shared-card", "name": "Alice", "email": "alice@test.jp"},
+    ]
+    bob_contacts = [
+        {"card_id": "shared-card", "name": "Bob", "email": "bob@test.jp"},
+    ]
+
+    with patch.object(user_storage, "USER_DATA_DIR", user_data_dir):
+        db.init_db(username="alice")
+        db.init_db(username="bob")
+
+        assert db.save_contacts(alice_contacts, username="alice") == 1
+        assert db.save_contacts(bob_contacts, username="bob") == 1
+
+        db.mark_processed(["shared-card"], username="alice")
+        db.save_template("welcome", "Hello Alice", username="alice")
+        db.save_template("welcome", "Hello Bob", username="bob")
+        db.set_setting("signature", "alice-signature", username="alice")
+        db.set_setting("signature", "bob-signature", username="bob")
+
+        assert db.get_contacts(username="alice")[0]["name"] == "Alice"
+        assert db.get_contacts(username="bob")[0]["name"] == "Bob"
+        assert db.get_processed_count(username="alice") == 1
+        assert db.get_processed_count(username="bob") == 0
+        assert db.get_template("welcome", username="alice") == "Hello Alice"
+        assert db.get_template("welcome", username="bob") == "Hello Bob"
+        assert db.get_setting("signature", username="alice") == "alice-signature"
+        assert db.get_setting("signature", username="bob") == "bob-signature"
+
+
+def test_import_shared_db_into_user_scope(tmp_path: Path) -> None:
+    shared_db = tmp_path / "shared.db"
+    user_data_dir = tmp_path / "user_data"
+
+    with (
+        patch.object(db, "DB_FILE", shared_db),
+        patch.object(user_storage, "USER_DATA_DIR", user_data_dir),
+    ):
+        db.init_db()
+        db.save_contacts(
+            [{"card_id": "c1", "name": "共有ユーザー", "email": "shared@test.jp"}]
+        )
+        db.mark_processed(["c1"])
+        db.save_template("shared-template", "Hello shared")
+        db.set_setting("signature", "shared-signature")
+
+        counts = db.import_shared_db(username="alice")
+
+        assert counts["contacts"] == 1
+        assert counts["processed"] == 1
+        assert counts["templates"] == 1
+        assert counts["settings"] == 1
+        assert db.get_contacts(username="alice")[0]["name"] == "共有ユーザー"
+        assert db.is_processed("c1", username="alice")
+        assert db.get_template("shared-template", username="alice") == "Hello shared"
+        assert db.get_setting("signature", username="alice") == "shared-signature"

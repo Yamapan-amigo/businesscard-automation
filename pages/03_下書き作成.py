@@ -6,31 +6,35 @@ import logging
 
 import streamlit as st
 
-import config
 import db
 import graph_client
 import processed_tracker
+import sidebar_user
 import template_engine
 import user_session
+import user_storage
 
 logger = logging.getLogger(__name__)
 
 st.set_page_config(page_title="下書き作成", page_icon="📧")
+sidebar_user.render_user_sidebar()
 
 st.title("📧 メール下書き作成")
 st.markdown("取得した連絡先に対して Outlook にメール下書きを自動作成します。")
 
 username = user_session.require_login()
+db.init_db(username=username)
 
 st.divider()
 
 # --- Pre-check: Outlook auth ---
-if not config.TOKEN_CACHE_FILE.exists():
+token_cache_path = user_storage.get_token_cache_path(username)
+if not token_cache_path.exists():
     st.error("⚠️ Outlook が未認証です。「設定」ページから先に認証してください。")
     st.stop()
 
 # --- Load unprocessed contacts ---
-contacts = db.get_contacts(unprocessed_only=True)
+contacts = db.get_contacts(username=username, unprocessed_only=True)
 
 if not contacts:
     st.warning("未処理の連絡先がありません。先に「スクレイピング」ページでデータを取得してください。")
@@ -54,26 +58,34 @@ st.divider()
 # --- Contact selection ---
 st.subheader("連絡先を選択")
 
+select_all_key = user_storage.scoped_key(username, "select_all")
+contact_key_prefix = user_storage.scoped_key(username, "contact")
+template_select_key = user_storage.scoped_key(username, "draft_template_select")
+
+
+def _contact_key(index: int) -> str:
+    return f"{contact_key_prefix}_{index}"
+
 
 def _toggle_all() -> None:
     """Sync individual checkboxes when 'select all' is toggled."""
-    val = st.session_state["select_all"]
+    val = st.session_state[select_all_key]
     for idx in range(len(contacts_with_email)):
-        st.session_state[f"contact_{idx}"] = val
+        st.session_state[_contact_key(idx)] = val
 
 
 # Initialize session state for all checkboxes on first load
-if "select_all" not in st.session_state:
-    st.session_state["select_all"] = True
-    for idx in range(len(contacts_with_email)):
-        st.session_state[f"contact_{idx}"] = True
+if select_all_key not in st.session_state:
+    st.session_state[select_all_key] = True
+for idx in range(len(contacts_with_email)):
+    st.session_state.setdefault(_contact_key(idx), st.session_state[select_all_key])
 
-st.checkbox("✅ すべて選択", key="select_all", on_change=_toggle_all)
+st.checkbox("✅ すべて選択", key=select_all_key, on_change=_toggle_all)
 
 selected: list[dict] = []
 for i, c in enumerate(contacts_with_email):
     label = f"**{c['name']}** — {c['company']}　`{c['email']}`"
-    if st.checkbox(label, key=f"contact_{i}"):
+    if st.checkbox(label, key=_contact_key(i)):
         selected.append(c)
 
 if not selected:
@@ -86,14 +98,14 @@ st.divider()
 st.subheader("テンプレート選択")
 
 # Load available templates
-all_templates = db.list_templates()
+all_templates = db.list_templates(username=username)
 template_names = [t["name"] for t in all_templates]
 
 if not template_names:
     # Fallback: load from file if no DB templates exist
     try:
         file_tmpl = template_engine.load_template("initial_outreach.txt")
-        db.save_template("initial_outreach", file_tmpl)
+        db.save_template("initial_outreach", file_tmpl, username=username)
         template_names = ["initial_outreach"]
     except FileNotFoundError:
         st.error("テンプレートがありません。「設定」ページで作成してください。")
@@ -102,10 +114,10 @@ if not template_names:
 selected_template = st.selectbox(
     "使用するテンプレート",
     template_names,
-    key="draft_template_select",
+    key=template_select_key,
 )
 
-template_str = db.get_template(selected_template) or ""
+template_str = db.get_template(selected_template, username=username) or ""
 
 sample = selected[0]
 subject_preview, body_preview = template_engine.render_template(template_str, sample)
@@ -158,7 +170,7 @@ if create_drafts:
 
     try:
         progress.progress(0, text="Outlook 認証中...")
-        token = graph_client.acquire_token()
+        token = graph_client.acquire_token(token_cache_path=token_cache_path)
 
         results: list[dict] = []
         failed: list[str] = []
@@ -179,8 +191,7 @@ if create_drafts:
 
                 # Mark this contact as processed immediately
                 cid = processed_tracker.contact_id(draft["contact"])
-                db.mark_processed([cid])
-                processed_tracker.mark_processed([draft["contact"]])
+                db.mark_processed([cid], username=username)
 
             except Exception as e:
                 logger.error("下書き作成失敗 (%s): %s", draft["to_email"], e)

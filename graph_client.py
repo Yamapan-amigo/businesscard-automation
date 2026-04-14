@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from pathlib import Path
 
 import msal
 import requests
@@ -16,32 +17,79 @@ logger = logging.getLogger(__name__)
 GRAPH_ENDPOINT = "https://graph.microsoft.com/v1.0"
 
 
-def _load_token_cache() -> msal.SerializableTokenCache:
+def _resolve_token_cache_path(token_cache_path: Path | None = None) -> Path:
+    return token_cache_path or config.TOKEN_CACHE_FILE
+
+
+def _load_token_cache(
+    token_cache_path: Path | None = None,
+) -> msal.SerializableTokenCache:
     cache = msal.SerializableTokenCache()
-    if config.TOKEN_CACHE_FILE.exists():
-        cache.deserialize(config.TOKEN_CACHE_FILE.read_text(encoding="utf-8"))
+    cache_path = _resolve_token_cache_path(token_cache_path)
+    if cache_path.exists():
+        cache.deserialize(cache_path.read_text(encoding="utf-8"))
     return cache
 
 
-def _save_token_cache(cache: msal.SerializableTokenCache) -> None:
-    if cache.has_state_changed:
-        config.TOKEN_CACHE_FILE.write_text(
-            cache.serialize(), encoding="utf-8"
-        )
-
-
-def acquire_token() -> str:
-    """Acquire an access token via MSAL device code flow.
-
-    Returns the access token string.
-    Raises RuntimeError if authentication fails.
-    """
-    cache = _load_token_cache()
+def _build_public_client_application(
+    token_cache_path: Path | None = None,
+) -> tuple[msal.PublicClientApplication, msal.SerializableTokenCache]:
+    cache = _load_token_cache(token_cache_path)
     app = msal.PublicClientApplication(
         client_id=config.MS_CLIENT_ID,
         authority=f"https://login.microsoftonline.com/{config.MS_TENANT_ID}",
         token_cache=cache,
     )
+    return app, cache
+
+
+def _save_token_cache(
+    cache: msal.SerializableTokenCache,
+    token_cache_path: Path | None = None,
+) -> None:
+    if cache.has_state_changed:
+        cache_path = _resolve_token_cache_path(token_cache_path)
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(
+            cache.serialize(), encoding="utf-8"
+        )
+
+
+def _initiate_device_flow(app: msal.PublicClientApplication) -> dict:
+    flow = app.initiate_device_flow(scopes=config.MS_SCOPES)
+    if "user_code" not in flow:
+        raise RuntimeError(f"デバイスコードフローの開始に失敗: {flow}")
+    return flow
+
+
+def start_device_flow(*, token_cache_path: Path | None = None) -> dict:
+    """Start a device code flow and return the flow payload."""
+    app, _ = _build_public_client_application(token_cache_path)
+    return _initiate_device_flow(app)
+
+
+def poll_device_flow(
+    flow: dict,
+    *,
+    token_cache_path: Path | None = None,
+) -> dict:
+    """Poll the device code flow once without blocking until expiry."""
+    app, cache = _build_public_client_application(token_cache_path)
+    result = app.acquire_token_by_device_flow(
+        flow,
+        exit_condition=lambda _flow: True,
+    )
+    _save_token_cache(cache, token_cache_path)
+    return result
+
+
+def acquire_token(*, token_cache_path: Path | None = None) -> str:
+    """Acquire an access token via MSAL device code flow.
+
+    Returns the access token string.
+    Raises RuntimeError if authentication fails.
+    """
+    app, cache = _build_public_client_application(token_cache_path)
 
     # Try silent token acquisition first
     accounts = app.get_accounts()
@@ -50,14 +98,12 @@ def acquire_token() -> str:
             config.MS_SCOPES, account=accounts[0]
         )
         if result and "access_token" in result:
-            _save_token_cache(cache)
+            _save_token_cache(cache, token_cache_path)
             logger.info("トークンをキャッシュから取得しました")
             return result["access_token"]
 
     # Fall back to device code flow
-    flow = app.initiate_device_flow(scopes=config.MS_SCOPES)
-    if "user_code" not in flow:
-        raise RuntimeError(f"デバイスコードフローの開始に失敗: {flow}")
+    flow = _initiate_device_flow(app)
 
     print("\n" + "=" * 60)
     print("  Microsoft 認証が必要です")
@@ -73,7 +119,7 @@ def acquire_token() -> str:
     sys.stdout.flush()
 
     result = app.acquire_token_by_device_flow(flow)
-    _save_token_cache(cache)
+    _save_token_cache(cache, token_cache_path)
 
     if "access_token" not in result:
         error = result.get("error_description", result.get("error", "不明"))

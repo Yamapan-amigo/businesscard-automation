@@ -15,6 +15,7 @@ import graph_client
 import processed_tracker
 import scraper
 import template_engine
+import user_storage
 
 logging.basicConfig(
     level=logging.INFO,
@@ -75,6 +76,11 @@ def parse_args() -> argparse.Namespace:
         default="initial_outreach.txt",
         help="テンプレートファイル名（デフォルト: initial_outreach.txt）",
     )
+    parser.add_argument(
+        "--user",
+        type=str,
+        help="ユーザー名。指定するとユーザー別のデータ/認証を使用",
+    )
     return parser.parse_args()
 
 
@@ -88,10 +94,16 @@ def run_login_eight() -> None:
     logger.info("セッション保存完了: %s", config.EIGHT_SESSION_FILE)
 
 
-def run_auth_outlook() -> None:
+def run_auth_outlook(*, username: str | None = None) -> None:
     logger.info("Microsoft Graph API 認証開始")
-    token = graph_client.acquire_token()
-    logger.info("認証成功。トークンキャッシュ保存済み: %s", config.TOKEN_CACHE_FILE)
+    token_cache_path = (
+        user_storage.get_token_cache_path(username) if username else None
+    )
+    graph_client.acquire_token(token_cache_path=token_cache_path)
+    logger.info(
+        "認証成功。トークンキャッシュ保存済み: %s",
+        token_cache_path or config.TOKEN_CACHE_FILE,
+    )
 
 
 def run_scrape(
@@ -200,7 +212,7 @@ def main() -> None:
         return
 
     if args.auth_outlook:
-        run_auth_outlook()
+        run_auth_outlook(username=args.user)
         return
 
     # Parse date filters

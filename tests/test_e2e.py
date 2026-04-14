@@ -405,6 +405,17 @@ class TestStreamlitPages:
         # Verify page rendered some content (title element varies by Streamlit version)
         assert len(at.title) > 0 or len(at.markdown) > 0
 
+    def test_dashboard_renders_after_username_input(self) -> None:
+        """Dashboard should still render after a user actually logs in."""
+        from streamlit.testing.v1 import AppTest
+
+        at = AppTest.from_file("app.py", default_timeout=10)
+        at.run()
+        at.text_input[0].input("alice")
+        at.run()
+        assert not at.exception, f"Dashboard crashed after username input: {at.exception}"
+        assert any("Eight" in msg.value for msg in at.caption)
+
     def test_settings_page_renders(self) -> None:
         """Settings page renders without error."""
         from streamlit.testing.v1 import AppTest
