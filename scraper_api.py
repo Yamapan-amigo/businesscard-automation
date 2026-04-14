@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 
@@ -81,15 +82,24 @@ def _fetch_contacts_page(
     return resp.json().get("personal_cards", [])
 
 
-def _parse_card(raw: dict) -> dict | None:
-    """Parse a single card from the API response."""
+def _extract_friend_card(raw: dict) -> dict | None:
     person = raw.get("person", {})
     pc_list = person.get("personal_cards", [])
     if not pc_list:
         return None
-
     pc = pc_list[0]
-    fc = pc.get("friend_card") or pc.get("my_card") or pc
+    return pc.get("friend_card") or pc.get("my_card") or pc
+
+
+def _parse_card(raw: dict) -> dict | None:
+    """Parse a single COMPLETED card from the API response.
+
+    Returns None if the card is pending OCR (entry_status != 40) or has
+    no name yet. Use ``_is_pending_card`` to count OCR-pending cards.
+    """
+    fc = _extract_friend_card(raw)
+    if fc is None:
+        return None
 
     if fc.get("entry_status") != ENTRY_STATUS_COMPLETE:
         return None
@@ -98,6 +108,7 @@ def _parse_card(raw: dict) -> dict | None:
     if not name:
         return None
 
+    person = raw.get("person", {})
     return {
         "card_id": str(person.get("id", "")),
         "name": name,
@@ -108,8 +119,20 @@ def _parse_card(raw: dict) -> dict | None:
         "title": fc.get("front_title", "").strip(),
         "phone": fc.get("front_company_phone_number", "").strip(),
         "mobile": fc.get("front_mobile_phone_number", "").strip(),
-        "added_date": fc.get("created_at", ""),
+        "added_date": fc.get("exchange_timestamp") or fc.get("created_at", ""),
     }
+
+
+def _pending_card_date(raw: dict) -> date | None:
+    """Return the exchange date of a pending-OCR card, or None."""
+    fc = _extract_friend_card(raw)
+    if fc is None:
+        return None
+    status = fc.get("entry_status")
+    if status == ENTRY_STATUS_COMPLETE or status is None:
+        return None
+    iso = fc.get("exchange_timestamp") or fc.get("created_at") or ""
+    return _parse_date_from_iso(iso)
 
 
 def _parse_date_from_iso(iso_str: str) -> date | None:
@@ -121,6 +144,37 @@ def _parse_date_from_iso(iso_str: str) -> date | None:
         return None
 
 
+@dataclass(frozen=True)
+class FetchResult:
+    """Result of a contact fetch — completed cards plus OCR-pending count."""
+
+    contacts: list[dict]
+    pending_count: int
+
+    def __iter__(self):
+        return iter(self.contacts)
+
+    def __len__(self) -> int:
+        return len(self.contacts)
+
+    def __bool__(self) -> bool:
+        return bool(self.contacts)
+
+
+def _date_in_range(
+    card_date: date | None,
+    target_date: date | None,
+    since_date: date | None,
+) -> bool:
+    if card_date is None:
+        return target_date is None and since_date is None
+    if target_date is not None:
+        return card_date == target_date
+    if since_date is not None:
+        return card_date >= since_date
+    return True
+
+
 def fetch_contacts(
     session_path: Path,
     *,
@@ -128,15 +182,12 @@ def fetch_contacts(
     since_date: date | None = None,
     max_pages: int = 50,
     per_page: int = 100,
-) -> list[dict]:
+) -> FetchResult:
     """Fetch contacts from Eight's API using session cookies.
 
-    Args:
-        session_path: Path to Playwright storage_state JSON.
-        target_date: Only return contacts added on this exact date.
-        since_date: Only return contacts added on or after this date.
-        max_pages: Maximum API pages to fetch.
-        per_page: Results per API page.
+    Returns a :class:`FetchResult` containing completed contacts and the
+    number of OCR-pending cards that matched the same date filter (so
+    callers can tell the user "N 件は OCR 処理中" instead of just "0 件").
     """
     cookies = _load_cookies_from_session(session_path)
 
@@ -155,6 +206,7 @@ def fetch_contacts(
     logger.info("セッション有効。データ取得開始")
 
     contacts: list[dict] = []
+    pending_count = 0
     stop_early = False
 
     for pg in range(1, max_pages + 1):
@@ -166,6 +218,12 @@ def fetch_contacts(
             break
 
         for raw in raw_cards:
+            pending_date = _pending_card_date(raw)
+            if pending_date is not None:
+                if _date_in_range(pending_date, target_date, since_date):
+                    pending_count += 1
+                continue
+
             contact = _parse_card(raw)
             if contact is None:
                 continue
@@ -190,8 +248,12 @@ def fetch_contacts(
             logger.info("日付フィルタにより早期終了（ページ %d）", pg)
             break
 
-    logger.info("合計 %d 件の連絡先を取得", len(contacts))
-    return contacts
+    logger.info(
+        "合計 %d 件の連絡先を取得（OCR処理中: %d 件）",
+        len(contacts),
+        pending_count,
+    )
+    return FetchResult(contacts=contacts, pending_count=pending_count)
 
 
 def check_session(session_path: Path) -> bool:

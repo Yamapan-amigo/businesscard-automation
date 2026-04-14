@@ -69,20 +69,30 @@ st.divider()
 if st.button("📥 名刺データを取得", type="primary", use_container_width=True):
     with st.spinner("Eight からデータを取得中..."):
         try:
-            contacts = scraper_api.fetch_contacts(
+            result = scraper_api.fetch_contacts(
                 session_path,
                 target_date=target_date,
                 since_date=since_date,
             )
 
-            if not contacts:
-                st.warning("連絡先が見つかりませんでした。日付フィルタを確認してください。")
+            if not result.contacts:
+                if result.pending_count > 0:
+                    st.warning(
+                        f"⏳ 対象期間に {result.pending_count} 件の名刺がありますが、"
+                        "まだ Eight 側で OCR 処理中です（名前・会社名などが未取得）。"
+                        "数分〜数時間後にもう一度お試しください。"
+                    )
+                else:
+                    st.warning("連絡先が見つかりませんでした。日付フィルタを確認してください。")
                 st.stop()
 
             # Save to SQLite
-            inserted = db.save_contacts(contacts, username=username)
+            inserted = db.save_contacts(result.contacts, username=username)
 
-            st.success(f"✅ {len(contacts)} 件の連絡先を取得（新規DB保存: {inserted} 件）")
+            msg = f"✅ {len(result.contacts)} 件の連絡先を取得（新規DB保存: {inserted} 件）"
+            if result.pending_count > 0:
+                msg += f" / OCR処理中: {result.pending_count} 件"
+            st.success(msg)
 
         except RuntimeError as e:
             error_msg = str(e)
